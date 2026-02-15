@@ -1,0 +1,24 @@
+name: strategic_gnn
+channels:
+  - pytorch
+  - pyg
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pyg
+  - pytorch-scatter
+  - pytorch-sparse
+  - pytorch-cluster
+  - pytorch-spline-conv
+  - numpy
+  - scipy
+  - pandas
+  - networkx
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - pip
