@@ -76,24 +76,12 @@ class LTModel:
                     next_indices = starts + offsets
                 else:
                     # Weighted Sampling (Padding Approach)
-                    # 1. Pad weights to max degree in this batch
                     max_d = moving_degs.max().item()
                     batch_w = torch.zeros(len(moving_nodes), max_d, device=self.device)
                     
-                    # 2. Fill the padded buffer (Slightly slow but correct)
-                    # We have to loop or use sophisticated scatter/gather here. 
-                    # For stability/readability, we use a loop over unique degrees or simple masking.
-                    # Optimization: We treat the flattened weights as a 1D selection problem? 
-                    # No, multinomial needs 2D [batch, categories].
-                    
-                    # FAST PATH: Construct a temporary 'dense' weight matrix for this batch
-                    # This is heavy on VRAM if max_d is huge, but fine for CORA/Citation graphs.
                     for i, (st, d) in enumerate(zip(starts, moving_degs)):
                         batch_w[i, :d] = self.weights[st : st+d]
                         
-                    # 3. Sample
-                    # batch_w contains weights, 0 padding elsewhere. 
-                    # torch.multinomial handles 0 probability automatically.
                     offsets = torch.multinomial(batch_w, 1).squeeze(1) # [Batch]
                     next_indices = starts + offsets
 
