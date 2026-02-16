@@ -73,12 +73,13 @@ class Experiment(object):
                   epochs=self.epochs)
         return model
 
-    def run(self):
+    def run(self, data: Data = None):
         """
         The only usage for this class
         """
         set_seed(seed=self.seed)
-        data = self.dataset_name.get_dataset(num_layers=self.num_layers).to(device=self.device)
+        if data is None:
+            data = self.dataset_name.get_dataset(num_layers=self.num_layers).to(device=self.device)
 
         # basic model
         basic_model = ExtendedSGConv(in_channels=data.num_features, out_channels=1,
@@ -109,3 +110,12 @@ class Experiment(object):
               .format(*attacked_accs), flush=True)
         print('Robust        -- Train: {:.4f}, Test: {:.4f}'
               .format(*robust_accs), flush=True)
+        
+        return {
+                'train_clean': clean_accs[0],
+                'train_naive': attacked_accs[0],
+                'train_robust': robust_accs[0],
+                'test_clean': clean_accs[1],
+                'test_naive': attacked_accs[1],
+                'test_robust': robust_accs[1]
+        }

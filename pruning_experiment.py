@@ -1,91 +1,76 @@
-import pandas as pd
-import numpy as np
 import torch
+import pandas as pd
+from tqdm import tqdm
 
+from core.arguments import get_synthetic_dataset_parser, get_real_datasets_parser
 from core.experiment import Experiment
-from core.models import ExtendedSGConv, StrategicSGConv
-from core.simulate_strategic_movement import simulate_strategic_movement
-from utils.general_helpers import set_seed
-from utils.train_or_test import test
-from utils.record_trial import record
+from utils.basic_classes import DataSet
 from influence_maximization import LTModel
 
+def sort_nodes(data, condition):
+    # Calculate degrees (out-degree based on source in edge_index)
+    # edge_index is [2, E], edge_index[0] is source
+    device = data.x.device
+    # Rankings
+    # Degree: Sort nodes by degree descending
+    if condition == 'degree':
+        src, _ = data.edge_index
+        deg = torch.bincount(src, minlength=data.num_nodes)
+        sorted_nodes = torch.argsort(deg, descending=True)
+    if condition == 'random':    
+        sorted_nodes = torch.randperm(data.num_nodes, device=device)
+    if condition == 'im':
+        im_model = LTModel(
+            edge_index=data.edge_index, 
+            num_nodes=data.num_nodes, 
+            weight_type='pagerank'
+        )
+        num_samples = min(200_000, data.num_nodes * 5)
+        rr_sets = im_model.generate_rr_sets_vectorized(num_samples=num_samples)
+        seeds = im_model.select_seeds_greedy(rr_sets, k=data.num_nodes)
+        not_seeds = set(range(data.num_nodes)) - set(seeds)
+        sorted_nodes = torch.tensor(seeds + list(not_seeds), device=device)
+    return sorted_nodes
 
-class PruningExperiment(Experiment):
-    def __init__(self, args):
-        super().__init__(args)
-        self.k = args.k_prune
-        self.method = args.method
-        self.args = args
+
+all_results = []
+num_layers = 1
+dataset = DataSet.SYNTHETIC
+data = dataset.get_dataset(num_layers)
+device = data.x.device
+for condition in ['degree', 'random', 'im']:
+    print(f"Running pruning experiment for condition: {condition}")
+    sorted_nodes = sort_nodes(data=data, condition=condition)
     
-    def run(self):
-        set_seed(seed=self.seed)
-        data = self.dataset_name.get_dataset(num_layers=self.num_layers).to(device=self.device)
+    for portion_keep in tqdm([0, 1, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]):
+        portion_remove = 100 - portion_keep
+        num_nodes_remove = int((portion_remove / 100) * data.num_nodes)
+        nodes_to_remove = sorted_nodes[:num_nodes_remove]
         
         # prune
-        if self.k > 0:
-            print(f"Pruning edges with k={self.k} using method '{self.method}'...", flush=True)
-            im_model = LTModel(
-                edge_index=data.edge_index, 
-                num_nodes=data.num_nodes, 
-                weight_type=self.method, # 'pagerank', 'uniform'
-                device=self.device
-            )
-            num_samples = min(200_000, data.num_nodes * 5)
-            rr_sets = im_model.generate_rr_sets_vectorized(num_samples=num_samples)
-            K = int(self.k * data.num_nodes)
-            seeds = im_model.select_seeds_greedy(rr_sets, k=K)
-            src_np = data.edge_index[0].cpu().numpy()
-            seeds_np = np.array(seeds)
-            mask_np = np.isin(src_np, seeds_np)
-            keep_mask = torch.tensor(~mask_np, device=self.device, dtype=torch.bool)
-            data.edge_index = data.edge_index[:, keep_mask]
+        src, dst = data.edge_index
+        disconnect_mask = torch.zeros(data.num_nodes, dtype=torch.bool, device=device)
+        disconnect_mask[nodes_to_remove] = True
+        edge_mask = ~disconnect_mask[src]
+        pruned_edge_index = data.edge_index[:, edge_mask]
         
-        # basic model
-        print("Training basic model on pruned graph...", flush=True)
-        basic_model = ExtendedSGConv(in_channels=data.num_features, out_channels=1,
-                                    K=self.num_layers, alpha=self.alpha).to(device=self.device)
-        basic_model = self._train_per_dataset_type(data=data, model=basic_model)
-        clean_accs = test(data=data, model=basic_model)
-
-        # strategic movement
-        print("Simulating strategic movement and testing basic model...", flush=True)
-        tmp_x = data.x.clone()
-        data.x = simulate_strategic_movement(x_init=data.x, edge_index=data.edge_index, model=basic_model,
-                                            strategic_model_parameters=self.strategic_model_parameters,
-                                            exact_movement=True)
-        attacked_accs = test(data=data, model=basic_model)
-        data.x = tmp_x
-                
-        # strategic model
-        print("Training strategic model on pruned graph...", flush=True)
-        set_seed(seed=self.seed)
-        strategic_model = StrategicSGConv(in_channels=data.num_features, out_channels=1, K=self.num_layers,
-                                        strategic_model_parameters=self.strategic_model_parameters,
-                                        alpha=self.alpha).to(device=self.device)
-        strategic_model = self._train_per_dataset_type(data=data, model=strategic_model)
-        robust_accs = test(data=data, model=strategic_model)
-
-        # results summary
-        print('Non-strategic -- Train: {:.4f}, Test: {:.4f}'
-            .format(*clean_accs), flush=True)
-        print('Naive         -- Train: {:.4f}, Test: {:.4f}'
-            .format(*attacked_accs), flush=True)
-        print('Robust        -- Train: {:.4f}, Test: {:.4f}'
-            .format(*robust_accs), flush=True)
-            
-        record(
-            exp_name=self.args.exp_name,
-            args=self.args,
-            metrics={
-                'clean_train': clean_accs[0],
-                'clean_test': clean_accs[1],
-                'naive_train': attacked_accs[0],
-                'naive_test': attacked_accs[1],
-                'robust_train': robust_accs[0],
-                'robust_test': robust_accs[1],
-                'k_prune': self.k
-            }
-        )
+        data_clone = data.clone()
+        data_clone.edge_index = pruned_edge_index
         
+        parser = get_real_datasets_parser()
+        args = parser.parse_args()
+        setattr(args, 'dataset_name', dataset)
+        setattr(args, 'num_layers', num_layers)
+        results = Experiment(args).run(data=data_clone)
+        
+        results['p'] = portion_keep
+        results['condition'] = condition
+        all_results.append(results)
+        
+all_results = pd.DataFrame(all_results)
+path = f"pruning_experiment_results_{dataset}_dst.csv"
+all_results.to_csv(path, index=False)
+print(f"Experiment completed and results saved to {path}")
+        
+
         
